@@ -61,15 +61,26 @@ jobs:
           echo "✅ Installed openapi-to-frontend plugin from branch: $OPENHANDS_EXTENSIONS_BRANCH"
 
       - name: Configure OpenHands
+        env:
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'anthropic/claude-opus-4-20250514' }}
+          LLM_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || '' }}
         run: |
           mkdir -p ~/.openhands
+          
+          # Build settings JSON
           cat > ~/.openhands/settings.json << EOF
           {
-            "llm_provider": "${{ vars.LLM_PROVIDER || 'anthropic' }}",
-            "llm_model": "${{ vars.LLM_MODEL || 'claude-sonnet-4-20250514' }}",
-            "llm_api_key": "${{ secrets.LLM_API_KEY }}"
+            "LLM_MODEL": "${LLM_MODEL}",
+            "LLM_API_KEY": "${LLM_API_KEY}",
+            "LLM_BASE_URL": "${LLM_BASE_URL}",
+            "AGENT": "CodeActAgent",
+            "LANGUAGE": "en",
+            "CONFIRMATION_MODE": "false"
           }
           EOF
+          
+          echo "✅ Configured OpenHands with model: ${LLM_MODEL}"
 
       - name: Create spec directory
         run: mkdir -p $(dirname $SPEC_SNAPSHOT_PATH)
