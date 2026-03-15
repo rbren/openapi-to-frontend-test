@@ -1,0 +1,163 @@
+name: Sync OpenAPI Frontend
+
+on:
+  # Run on demand
+  workflow_dispatch:
+  # Or on a schedule (e.g., daily at midnight)
+  schedule:
+    - cron: '0 0 * * *'
+  # Or when the workflow file itself changes
+  push:
+    paths:
+      - '.github/workflows/sync-openapi.yml'
+
+env:
+  # ⚠️ CONFIGURE THIS: URL to your OpenAPI specification
+  OPENAPI_SPEC_URL: 'https://raw.githubusercontent.com/OpenHands/docs/refs/heads/main/openapi/agent-sdk.json'
+  # Where to store the spec snapshot
+  SPEC_SNAPSHOT_PATH: '.openapi/spec.json'
+  # OpenHands extensions branch (use 'main' for stable, or a feature branch)
+  OPENHANDS_EXTENSIONS_BRANCH: ${{ vars.OPENHANDS_EXTENSIONS_BRANCH || 'add-openapi-to-frontend-plugin' }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install OpenHands CLI
+        run: |
+          pip install uv
+          uv tool install openhands --python 3.12
+
+      - name: Install openapi-to-frontend plugin
+        run: |
+          # Clone the OpenHands extensions repository
+          git clone --depth 1 --branch "$OPENHANDS_EXTENSIONS_BRANCH" \
+            https://github.com/OpenHands/extensions.git \
+            /tmp/openhands-extensions
+          
+          # Install the plugin to the OpenHands skills directory
+          mkdir -p ~/.openhands/plugins
+          cp -r /tmp/openhands-extensions/plugins/openapi-to-frontend ~/.openhands/plugins/
+          
+          echo "✅ Installed openapi-to-frontend plugin from branch: $OPENHANDS_EXTENSIONS_BRANCH"
+
+      - name: Configure OpenHands
+        run: |
+          mkdir -p ~/.openhands
+          cat > ~/.openhands/settings.json << EOF
+          {
+            "llm_provider": "${{ vars.LLM_PROVIDER || 'anthropic' }}",
+            "llm_model": "${{ vars.LLM_MODEL || 'claude-sonnet-4-20250514' }}",
+            "llm_api_key": "${{ secrets.LLM_API_KEY }}"
+          }
+          EOF
+
+      - name: Create spec directory
+        run: mkdir -p $(dirname $SPEC_SNAPSHOT_PATH)
+
+      - name: Download current OpenAPI spec
+        run: |
+          curl -fSL "$OPENAPI_SPEC_URL" -o new-spec.json
+          echo "Downloaded spec from $OPENAPI_SPEC_URL"
+
+      - name: Check if this is initial generation or update
+        id: check-mode
+        run: |
+          if [ -f "$SPEC_SNAPSHOT_PATH" ]; then
+            echo "mode=update" >> $GITHUB_OUTPUT
+            echo "📝 Existing spec found - will perform incremental update"
+          else
+            echo "mode=initial" >> $GITHUB_OUTPUT
+            echo "🆕 No existing spec - will perform initial generation"
+          fi
+
+      - name: Check for spec changes (update mode only)
+        id: check-changes
+        if: steps.check-mode.outputs.mode == 'update'
+        run: |
+          if diff -q "$SPEC_SNAPSHOT_PATH" new-spec.json > /dev/null 2>&1; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "✅ Spec unchanged - no update needed"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "🔄 Spec changed - update required"
+            # Keep the old spec for diff
+            cp "$SPEC_SNAPSHOT_PATH" old-spec.json
+          fi
+
+      - name: Generate initial codebase
+        if: steps.check-mode.outputs.mode == 'initial'
+        run: |
+          openhands --headless -t "Read ~/.openhands/plugins/openapi-to-frontend/commands/openapi-to-frontend.md and execute: /openapi-to-frontend new-spec.json"
+
+      - name: Apply incremental updates
+        if: steps.check-mode.outputs.mode == 'update' && steps.check-changes.outputs.changed == 'true'
+        run: |
+          openhands --headless -t "Read ~/.openhands/plugins/openapi-to-frontend/commands/openapi-to-frontend.md and execute: /openapi-to-frontend new-spec.json old-spec.json"
+
+      - name: Update spec snapshot
+        if: steps.check-mode.outputs.mode == 'initial' || steps.check-changes.outputs.changed == 'true'
+        run: |
+          cp new-spec.json "$SPEC_SNAPSHOT_PATH"
+          echo "📸 Spec snapshot updated"
+
+      - name: Create Pull Request
+        if: steps.check-mode.outputs.mode == 'initial' || steps.check-changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: |
+            ${{ steps.check-mode.outputs.mode == 'initial' && 'chore: initial frontend generation from OpenAPI spec' || 'chore: update frontend from OpenAPI spec changes' }}
+          title: |
+            ${{ steps.check-mode.outputs.mode == 'initial' && '🆕 Initial frontend generation from OpenAPI' || '🔄 Update frontend from OpenAPI changes' }}
+          body: |
+            ## Summary
+            
+            ${{ steps.check-mode.outputs.mode == 'initial' && 'This PR contains the initial frontend codebase generated from the OpenAPI specification.' || 'This PR contains incremental updates based on changes to the OpenAPI specification.' }}
+            
+            **Spec URL:** `${{ env.OPENAPI_SPEC_URL }}`
+            **Plugin branch:** `${{ env.OPENHANDS_EXTENSIONS_BRANCH }}`
+            
+            ## What's included
+            
+            ${{ steps.check-mode.outputs.mode == 'initial' && '- TypeScript API client (`client/`)
+            - React components (`components/`)
+            - Frontend application (`app/`)
+            - Test suite (`tests/`)
+            - CI/CD workflows (`.github/workflows/`)
+            - OpenAPI spec snapshot (`.openapi/spec.json`)' || '- Updated TypeScript types and API methods
+            - Updated React components
+            - Updated tests
+            - New OpenAPI spec snapshot' }}
+            
+            ## Review checklist
+            
+            - [ ] Generated code compiles without errors
+            - [ ] Tests pass
+            - [ ] UI renders correctly
+            - [ ] API integration works as expected
+          branch: openapi-frontend-sync
+          delete-branch: true
+
+      - name: Skip message
+        if: steps.check-mode.outputs.mode == 'update' && steps.check-changes.outputs.changed == 'false'
+        run: echo "✅ No changes detected in OpenAPI spec - nothing to do"
