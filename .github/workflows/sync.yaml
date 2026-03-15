@@ -120,6 +120,7 @@ jobs:
         if: steps.check-mode.outputs.mode == 'initial' || steps.check-changes.outputs.changed == 'true'
         run: |
           git checkout HEAD -- .github/ 2>/dev/null || true
+          git clean -df .github/ | true
           echo "🔄 Reverted any changes to .github/ directory"
 
       - name: Create Pull Request
